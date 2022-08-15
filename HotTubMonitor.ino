@@ -30,8 +30,26 @@
  *  be configured on the main portal setup screen.
  *  - More code cleanup.
  * 
+ *  Patch 3.3.3 This is a bugfix release
+ *    - Fixed portal AP mode getting stuck and advertising AP SSID always
+ *    - Stopped the DoubleReset form detecting when we reset after the AP timeout
+ *    - Added debug macros so that code is smaller when debugging is not needed.
+ *    - The MQTT Topics are now settable (and change for debugging).
+ *    
  */
 
+// #define __DEBUG__ // Comment out to turn off debuging
+
+#ifdef __DEBUG__
+#define DEBUG(s)   { Serial.print(F(s)); }
+#define DEBUGVAR(s,v)  { Serial.print(F(s)); Serial.print(v); }
+#define DEBUGHEX(s,v) { Serial.print(F(s)); Serial.print(F("0x")); Serial.print(v, HEX); }
+#else
+#define DEBUG(s)
+#define DEBUGVAR(s,v)
+#define DEBUGHEX(s,v)
+#endif
+ 
 #include <FS.h>
 #include <ESP8266WiFi.h>
 #include <DNSServer.h>
@@ -66,6 +84,14 @@ DeviceAddress boardSensor = {0x28, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 
 /************ Global State (you don't need to change this!) ******************/
 
+#ifdef __DEBUG__
+#define BOARD_TOPIC "debug/in/hottub_board_temp/state"
+#define WATER_TOPIC "debug/in/hottub_water_temp/state"
+#else
+#define BOARD_TOPIC "sensors/in/hottub_board_temp/state"
+#define WATER_TOPIC "sensors/in/hottub_water_temp/state"
+#endif
+
 char mqtt_server[40] = "mqtt.example.com";
 char mqtt_port[6] = "1883";
 char mqtt_user[20] = "";
@@ -86,6 +112,13 @@ DoubleResetDetector drd(DRD_TIMEOUT, DRD_ADDRESS);
 void saveConfigCallback() {
   Serial.println("Should save config....");
   shouldSaveConfig = true;
+}
+
+/************ Call back when entering AP/Config mode ******************/
+void configModeCallback() {
+  DEBUG("Entering Captive Portal AP Mode\n")
+  Serial.println(F("Captive Portal Setup mode..."));
+  Serial.println(WiFi.softAPIP());
 }
 
 /*********** Save the config to the Flash File System  *********************/
@@ -126,13 +159,14 @@ void readConfig() {
     
     // mounted file system
     if (SPIFFS.exists("/config.json")) {
+      DEBUG("DEBUG: Reading Configin SPIFFS\n");
       
       //file exists, reading and loading
-      Serial.println("reading config file");
+      DEBUG("reading config file\n");
       File configFile = SPIFFS.open("/config.json", "r");
       if (configFile) {
         
-        Serial.println("opened config file");
+        DEBUG("opened config file\n");
         size_t size = configFile.size();
         // Allocate a buffer to store contents of the file.
         std::unique_ptr<char[]> buf(new char[size]);
@@ -162,7 +196,7 @@ void readConfig() {
       }
     }
   } else {
-    Serial.println("failed to mount FS");
+    DEBUG("failed to mount FS\n");
   }
     //end read
 }
@@ -170,6 +204,8 @@ void readConfig() {
   
 /*********** Connect to the wireless AP and then the MQTT server *************/
 void connect() {
+  char ClientID[32];
+  
   Serial.print("Checking wifi connection...");
   while (WiFi.status() != WL_CONNECTED) {
     Serial.print(".");
@@ -182,8 +218,11 @@ void connect() {
   Serial.print(" with IP address ");
   Serial.println(WiFi.localIP());
 
+  strcpy(ClientID, "HotTub_");
+  strcat(ClientID, WiFi.localIP().toString().c_str());
+
   Serial.print("Checking MQTT connection...");
-  while (!mqtt.connect( mqtt_server, mqtt_user, mqtt_pass )) {
+  while (!mqtt.connect( ClientID, mqtt_user, mqtt_pass )) {
     Serial.print(".");
     delay(500);
   }
@@ -251,18 +290,22 @@ DallasTemperature sensors(&oneWire);
 void setup() {
   // Serial port Setup
   Serial.begin(115200);
+  
   // Statrus LED Setup
   pinMode(STATUS_PIN, OUTPUT);
   digitalWrite(STATUS_PIN, HIGH);
   delay(500);
-  
+
+  DEBUG("\n\n")
+  Serial.println();
   Serial.println(F("ESP8266 HotTub MQTT Controller"));
-  Serial.println(F("Version: 3.3.2   August 2018"));
+  Serial.println(F("Version: 3.3.2   August 20228"));
 
   // Grab the config stored in the SPIFFS File system.
   readConfig();
   
   // Setup the hostname and connect to the wifi
+  WiFi.mode(WIFI_STA);
   WiFi.hostname("hottub-controller-test");
 
   // Setup the WiFi Manager client. This is responsable for the web portal to setup Wireless.
@@ -273,6 +316,7 @@ void setup() {
   
   WiFiManager wifiManager;
   wifiManager.setDebugOutput(false);
+  wifiManager.setSaveConfigCallback(saveConfigCallback);
   
   // Allow for a pin to reset all the WiFi Setup information.
   // The is similar to factory reset as it will boot into AP mode. 
@@ -296,31 +340,41 @@ void setup() {
   // Start and try to connect to the network.
   // If not connected, then wait in AP mode for 180 seconds then reset
 
-  wifiManager.setSaveConfigCallback(saveConfigCallback);
   wifiManager.addParameter(&custom_mqtt_server);
   wifiManager.addParameter(&custom_mqtt_port);
   wifiManager.addParameter(&custom_mqtt_user);
   wifiManager.addParameter(&custom_mqtt_pass);
-  
-  wifiManager.setTimeout(180);
-  if(!wifiManager.autoConnect("AutoConnectAP")) {
+
+  DEBUG("Entering Config Portal Mode.")
+  wifiManager.setTimeout(300);
+  if(!wifiManager.autoConnect("HotTub-AP")) {
+    DEBUG("Config Portal Times out.  Resetting...\n")
+    drd.stop();
     ESP.reset();
     delay(1000);
   }
 
+  // If HERE then we are connected up to ATA mode to a wifi AP
+  DEBUG("Configured and connected to a WiFi AP\n")
+  
   strcpy(mqtt_server, custom_mqtt_server.getValue());
   strcpy(mqtt_port, custom_mqtt_port.getValue());
   strcpy(mqtt_user, custom_mqtt_user.getValue());
   strcpy(mqtt_pass, custom_mqtt_pass.getValue());
 
-  Serial.print( "MQTT Server : " );
-  Serial.println( mqtt_server );
-  Serial.print( "MQTT port   : ");
-  Serial.println( mqtt_port );
-  Serial.print( "MQTT user   : ");
-  Serial.println( mqtt_user );
-  Serial.print( "MQTT pass   : ");
-  Serial.println( mqtt_pass );
+  DEBUGVAR( "MQTT Server : ", mqtt_server ); DEBUG("\n");
+  DEBUGVAR( "MQTT Port   : ", mqtt_port ); DEBUG("\n");
+  DEBUGVAR( "MQTT User   : ", mqtt_user ); DEBUG("\n");
+  DEBUGVAR( "MQTT Pass   : ", mqtt_pass ); DEBUG("\n")
+   // Serial.print( "MQTT Server : " );
+  // Serial.println( mqtt_server );
+  // Serial.print( "MQTT port   : ");
+  // Serial.println( mqtt_port );
+  // Serial.print( "MQTT user   : ");
+  // Serial.println( mqtt_user );
+  // Serial.print( "MQTT pass   : ");
+  // Serial.println( mqtt_pass );
+   
   Serial.print("Board Sensor : ");
   printAddress(boardSensor);
   Serial.println();
@@ -333,6 +387,14 @@ void setup() {
   mqtt.begin(mqtt_server, client);
   mqtt.onMessage(messageReceived);
 
+  DEBUG("MQTT : \n")
+  DEBUG("Publishing Board Temparature on:")
+  DEBUG(BOARD_TOPIC)
+  DEBUG("\n")
+  DEBUG("Publishing Water Temparature on:")
+  DEBUG(BOARD_TOPIC)
+  DEBUG("\n")
+  
   connect();
 
   // Setup the Tempature Sensor
@@ -418,6 +480,7 @@ void loop() {
   // Start the MQTT loop to monitor the MQTT connection.
   mqtt.loop();
   delay(10);
+  
   if (!mqtt.connected()) {
     connect();
   }
@@ -434,7 +497,7 @@ void loop() {
       
       temp = sensors.getTempF(boardSensor); 
       dtostrf( temp, 5, 2, buff);
-      if (! mqtt.publish("sensors/in/hottub_board_temp/state", buff)) { // Publish the value and check if OK
+      if (! mqtt.publish(BOARD_TOPIC, buff)) { // Publish the value and check if OK
         Serial.println(F("Failed update"));
       } else {
         Serial.println(F("Successful update!"));
@@ -450,7 +513,7 @@ void loop() {
       temp = sensors.getTempF(waterSensor);  
 
       dtostrf( temp, 5, 2, buff);        
-      if (! mqtt.publish("sensors/in/hottub_water_temp/state", buff)) { // Publish the value and check if OK
+      if (! mqtt.publish(WATER_TOPIC, buff)) { // Publish the value and check if OK
         Serial.println(F("Failed update"));
       } else {
         Serial.println(F("Successful update!"));
@@ -463,4 +526,3 @@ void loop() {
   }
 
 }
-
