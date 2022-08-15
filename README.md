@@ -3,7 +3,7 @@ ESP8266 Arduino Wireless sketch to monitor the temperature of a HotTub and repor
 
 I started this project so I could have a way to monitor the temperature of my Hot Tub.  I live in Canada and it gets cold here in the winter.  If something happened then things could freeze up before I noticed any issues.  This project monitors the temperature and updates me (through an OpenHAB server) if there is an issue.
 
-The temperature monitor is created using a ESP8266 Arduino board (I used a Adafruit 8266 Hazzah) and two Dallas OneWire (DS18B20) temperature sensors. I use one of the sensors to monitor the board temperature (inside the enclosure) an another one as a probe that sits in the hot tub.
+The temperature monitor is created using a ESP8266 Arduino board ([Adafruit 8266 Hazzah](https://www.adafruit.com/product/2471)) and two Dallas OneWire (DS18B20) temperature sensors. I use one of the sensors to monitor the board temperature (inside the enclosure) an another one as a probe that sits in the hot tub.
 
 ### Dependancies
 
