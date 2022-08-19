@@ -63,7 +63,7 @@
 #include <Base64.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
-#include "MQTT.h"
+#include "MQTT.h"                 // arduino-mqtt 2.5.0
 #include <EEPROM.h>
 #include <DoubleResetDetector.h>
 #include <stdlib.h>
@@ -72,23 +72,25 @@
 void connect(void);
 
 
-/************************* Status LED(s)  ************************************/
+/************************* Status LED(s)  ***********************************/
 #define STATUS_PIN  0
 
 /************************* Double Reset  ************************************/
 #define DRD_TIMEOUT 2   // Timeout in seconds for a double reset
 #define DRD_ADDRESS 0   // location in EEPROM to store the Double Reset flag
 
-/************************* One Wire Temp DS18B20 *****************************/
+/************************* One Wire Temp DS18B20 ****************************/
 #define ONEWIRE_BOARD_BUS 2
 #define ONEWIRE_WATER_BUS 12
 
-// do not edit the water sensor.  It is depermined at startup. This is just a place holder.
+/****************************************************************************/
+/****************** (you don't need to change this!) ************************/
+
+// The sensor address is depermined at startup. This is just a place holder.
 DeviceAddress waterSensorAddr = {0x28, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 DeviceAddress boardSensorAddr = {0x28, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 
-/************ Global State (you don't need to change this!) ******************/
-
+/**************************** MQTT Setup ***********************************/
 #ifdef __DEBUG__
 #define BOARD_TOPIC "debug/in/hottub_board_temp/state"
 #define WATER_TOPIC "debug/in/hottub_water_temp/state"
@@ -102,24 +104,26 @@ char mqtt_port[6] = "1883";
 char mqtt_user[20] = "";
 char mqtt_pass[32] = "";
 
-bool shouldSaveConfig = false;
-
-// Setup the WiFi client.  The WiFi client handles all the wireless communication.
-WiFiClient client;
-
 // Setup the MQTT client.  The MQTT client handles all MQTT traffic.
 MQTTClient mqtt;
 
+/**************************** WiFi Setup ***********************************/
+//     Setup the WiFi client.
+WiFiClient client;
+//     Flag to know when the config was updates and should be saved.
+bool shouldSaveConfig = false;
+
+/************************ Double Reset Setup *******************************/
 // Setup the double reset client
 DoubleResetDetector drd(DRD_TIMEOUT, DRD_ADDRESS);
 
-/*********** Callback routing from WiFiManager to save Config  **************/
+/********** Callback routing from WiFiManager to save Config  **************/
 void saveConfigCallback() {
   DEBUG("Should save config....\n");
   shouldSaveConfig = true;
 }
 
-/************ Call back when entering AP/Config mode ******************/
+/************** Call back when entering AP/Config mode *********************/
 void configModeCallback() {
   DEBUG("Entering Captive Portal AP Mode\n")
   Serial.println(F("Captive Portal Setup mode..."));
@@ -280,7 +284,7 @@ OneWire oneWireBoard(ONEWIRE_BOARD_BUS);
 OneWire oneWireWater(ONEWIRE_WATER_BUS);
 
 // Create the sensor by passing a reference to the oneWire instance we created.
-DallasTemperature sensors(&oneWireBoard);
+DallasTemperature boardSensor(&oneWireBoard);
 DallasTemperature waterSensor(&oneWireWater);
 
 /************** Setup Routing Starts Here *****************************/
@@ -388,15 +392,15 @@ void setup() {
   connect();
 
   // Setup the Tempature Sensor
-  sensors.begin();
+  boardSensor.begin();
   waterSensor.begin();
 
-  int sensorCount = sensors.getDeviceCount();
+  int sensorCount = boardSensor.getDeviceCount();
   DEBUGVAR("Found ", sensorCount);
   DEBUG(" devices on the board sensor bus.\n")
 
   // Check to see if the board sensor is responding.
-  if (! checkForAddress(sensors, boardSensorAddr)) {
+  if (! checkForAddress(boardSensor, boardSensorAddr)) {
     if ( sensorCount > 1 ) {
       Serial.println(F("\nFound more than one sensor on the Board Sensor Bus. This is an error."));
       Serial.println(F("There should only be one board sensor. This may be an earlier version "));
@@ -407,7 +411,7 @@ void setup() {
     
 
     if ( sensorCount == 1 ) {
-      sensors.getAddress(boardSensorAddr, 0);
+      boardSensor.getAddress(boardSensorAddr, 0);
       Serial.print(F("\nFound the board sensor with the following address: "));
       printAddress(boardSensorAddr);
       Serial.println();
@@ -449,7 +453,7 @@ void setup() {
     }
   }
 
-  if ( sensors.validAddress(boardSensorAddr) ) {
+  if ( boardSensor.validAddress(boardSensorAddr) ) {
     Serial.print(F("Board Sensor Address: "));
     printAddress(boardSensorAddr);
     Serial.println();
@@ -494,12 +498,12 @@ void loop() {
     lastMsg = now;
 
     // ******** Board Sensor Polling *******
-    sensors.requestTemperatures();
+    boardSensor.requestTemperatures();
 
     // Record the board temperature but only if it is available.
-    if ( checkForAddress(sensors, boardSensorAddr) ) {
+    if ( checkForAddress(boardSensor, boardSensorAddr) ) {
       
-      temp = sensors.getTempF(boardSensorAddr); 
+      temp = boardSensor.getTempF(boardSensorAddr); 
       dtostrf( temp, 5, 2, buff);
       if (! mqtt.publish(BOARD_TOPIC, buff)) { // Publish the value and check if OK
         Serial.println(F("Failed update"));
