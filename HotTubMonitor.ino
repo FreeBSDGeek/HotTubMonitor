@@ -42,7 +42,7 @@
  *    
  */
 
-#define __DEBUG__ // Comment out to turn off debuging
+// #define __DEBUG__ // Comment out to turn off debuging
 
 #ifdef __DEBUG__
 #define DEBUG(s)   { Serial.print(F(s)); }
@@ -300,7 +300,7 @@ void setup() {
   DEBUG("\n\n")
   Serial.println();
   Serial.println(F("ESP8266 HotTub MQTT Controller"));
-  Serial.println(F("Version: 4.0.0-alpha   August 2022"));
+  Serial.println(F("Version: 4.0.0 beta   August 2022"));
 
   // Grab the config stored in the SPIFFS File system.
   readConfig();
