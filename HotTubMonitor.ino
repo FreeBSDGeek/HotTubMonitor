@@ -36,6 +36,10 @@
  *    - Added debug macros so that code is smaller when debugging is not needed.
  *    - The MQTT Topics are now settable (and change for debugging).
  *    
+ * Version 4.0.0
+ *    - RE-write to create two one wire bus'.  One for each sensor.  This will allow
+ *    for easier handling of sensor detection and no need for a sensor setup.
+ *    
  */
 
 // #define __DEBUG__ // Comment out to turn off debuging
@@ -59,7 +63,7 @@
 #include <Base64.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
-#include "MQTT.h"
+#include "MQTT.h"                 // arduino-mqtt 2.5.0
 #include <EEPROM.h>
 #include <DoubleResetDetector.h>
 #include <stdlib.h>
@@ -68,22 +72,25 @@
 void connect(void);
 
 
-/************************* Status LED(s)  ************************************/
+/************************* Status LED(s)  ***********************************/
 #define STATUS_PIN  0
 
 /************************* Double Reset  ************************************/
 #define DRD_TIMEOUT 2   // Timeout in seconds for a double reset
 #define DRD_ADDRESS 0   // location in EEPROM to store the Double Reset flag
 
-/************************* One Wire Temp DS18B20 *****************************/
-#define ONE_WIRE_BUS 2
+/************************* One Wire Temp DS18B20 ****************************/
+#define ONEWIRE_BOARD_BUS 2
+#define ONEWIRE_WATER_BUS 12
 
-// do not edit the water sensor.  It is depermined at startup. This is just a place holder.
-DeviceAddress waterSensor = {0x28, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
-DeviceAddress boardSensor = {0x28, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+/****************************************************************************/
+/****************** (you don't need to change this!) ************************/
 
-/************ Global State (you don't need to change this!) ******************/
+// The sensor address is depermined at startup. This is just a place holder.
+DeviceAddress waterSensorAddr = {0x28, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+DeviceAddress boardSensorAddr = {0x28, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 
+/**************************** MQTT Setup ***********************************/
 #ifdef __DEBUG__
 #define BOARD_TOPIC "debug/in/hottub_board_temp/state"
 #define WATER_TOPIC "debug/in/hottub_water_temp/state"
@@ -97,24 +104,26 @@ char mqtt_port[6] = "1883";
 char mqtt_user[20] = "";
 char mqtt_pass[32] = "";
 
-bool shouldSaveConfig = false;
-
-// Setup the WiFi client.  The WiFi client handles all the wireless communication.
-WiFiClient client;
-
 // Setup the MQTT client.  The MQTT client handles all MQTT traffic.
 MQTTClient mqtt;
 
+/**************************** WiFi Setup ***********************************/
+//     Setup the WiFi client.
+WiFiClient client;
+//     Flag to know when the config was updates and should be saved.
+bool shouldSaveConfig = false;
+
+/************************ Double Reset Setup *******************************/
 // Setup the double reset client
 DoubleResetDetector drd(DRD_TIMEOUT, DRD_ADDRESS);
 
-/*********** Callback routing from WiFiManager to save Config  **************/
+/********** Callback routing from WiFiManager to save Config  **************/
 void saveConfigCallback() {
-  Serial.println("Should save config....");
+  DEBUG("Should save config....\n");
   shouldSaveConfig = true;
 }
 
-/************ Call back when entering AP/Config mode ******************/
+/************** Call back when entering AP/Config mode *********************/
 void configModeCallback() {
   DEBUG("Entering Captive Portal AP Mode\n")
   Serial.println(F("Captive Portal Setup mode..."));
@@ -124,7 +133,7 @@ void configModeCallback() {
 /*********** Save the config to the Flash File System  *********************/
 void saveConfig() {
 
-  Serial.println("saving the custom config parameters...");
+  DEBUG("Saving Config from SPIFFS\n");
   DynamicJsonBuffer jsonBuffer;
   JsonObject& json = jsonBuffer.createObject();
   json["mqtt_server"] = mqtt_server;
@@ -134,19 +143,15 @@ void saveConfig() {
   
   JsonArray& boardSensorValues = json.createNestedArray("board_sensor");
   for (uint8_t i = 0; i < 8; i++) {
-    boardSensorValues.add(boardSensor[i]);
+    boardSensorValues.add(boardSensorAddr[i]);
   }
-
-  Serial.print("DEBUG: Saved the boardSensor Address ");
-  printAddress(boardSensor);
-  Serial.println(" to json config.");
   
   File configFile = SPIFFS.open("/config.json", "w");
   if (!configFile) {
-    Serial.println("failed to open config file to writing.");
+    Serial.println(F("failed to open config file to writing."));
   }
 
-  json.printTo(Serial);
+  // json.printTo(Serial);
   json.printTo(configFile);
   configFile.close();
 
@@ -159,14 +164,12 @@ void readConfig() {
     
     // mounted file system
     if (SPIFFS.exists("/config.json")) {
-      DEBUG("DEBUG: Reading Configin SPIFFS\n");
+      DEBUG("Reading Config from SPIFFS\n");
       
       //file exists, reading and loading
-      DEBUG("reading config file\n");
       File configFile = SPIFFS.open("/config.json", "r");
       if (configFile) {
         
-        DEBUG("opened config file\n");
         size_t size = configFile.size();
         // Allocate a buffer to store contents of the file.
         std::unique_ptr<char[]> buf(new char[size]);
@@ -175,28 +178,23 @@ void readConfig() {
         DynamicJsonBuffer jsonBuffer;
         JsonObject& json = jsonBuffer.parseObject(buf.get());
         if (json.success()) {
-          json.printTo(Serial);
+          // json.printTo(Serial);
   
           strcpy(mqtt_server, json["mqtt_server"]);
           strcpy(mqtt_port, json["mqtt_port"]);
           strcpy(mqtt_user, json["mqtt_user"]);
           strcpy(mqtt_pass, json["mqtt_pass"]);
     
-          // JsonArray& boardSensorValues - json.parseNestedArray("board_sensor");
           for (uint8_t i = 0; i < 8; i++) {
-            boardSensor[i] = json["board_sensor"][i];
+            boardSensorAddr[i] = json["board_sensor"][i];
           }
-          // memcpy(boardSensor, json["board_sensor"], sizeof(boardSensor));
 
-          Serial.print("DEBUG: Read the boardSensor Address  : ");
-          printAddress(boardSensor);
-          Serial.println(" from the Json config file.");
         } 
         configFile.close();
       }
     }
   } else {
-    DEBUG("failed to mount FS\n");
+    DEBUG("failed to mount SPIFFS\n");
   }
     //end read
 }
@@ -206,27 +204,27 @@ void readConfig() {
 void connect() {
   char ClientID[32];
   
-  Serial.print("Checking wifi connection...");
+  Serial.print(F("Checking wifi connection..."));
   while (WiFi.status() != WL_CONNECTED) {
     Serial.print(".");
     delay(500);
   }
-  Serial.println("connected!");
+  Serial.println(F("connected!"));
   
-  Serial.print("Connected to ");
+  Serial.print(F("Connected to "));
   Serial.print(WiFi.SSID());
-  Serial.print(" with IP address ");
+  Serial.print(F(" with IP address "));
   Serial.println(WiFi.localIP());
 
   strcpy(ClientID, "HotTub_");
   strcat(ClientID, WiFi.localIP().toString().c_str());
 
-  Serial.print("Checking MQTT connection...");
+  Serial.print(F("Checking MQTT connection..."));
   while (!mqtt.connect( ClientID, mqtt_user, mqtt_pass )) {
-    Serial.print(".");
+    Serial.print(F("."));
     delay(500);
   }
-  Serial.println("connected!");
+  Serial.println(F("connected!"));
 }
 
 /**********  Callback routine when a message is received.  **************/
@@ -254,7 +252,7 @@ bool compareAddress(DeviceAddress targetAddress, DeviceAddress deviceAddress) {
   return true;
 }
 
-/*********** Check abnd see if the sensor is connected to the system. *****/
+/*********** Check and see if the sensor is connected to the system. *****/
 bool checkForAddress(DallasTemperature sensors, DeviceAddress checkAddr) {
   int found = -1;
   DeviceAddress tempAddr;
@@ -271,7 +269,8 @@ bool checkForAddress(DallasTemperature sensors, DeviceAddress checkAddr) {
 void stop() {
 
   while (1) {
-    drd.loop();   
+    drd.loop(); 
+    drd.stop();  
     digitalWrite(STATUS_PIN, HIGH);
     delay(500);
     digitalWrite(STATUS_PIN, LOW);
@@ -281,10 +280,12 @@ void stop() {
 
 /***********************************************************************/
 // Setup OneWire Instance to communicate to the DS18B20 sensor.
-OneWire oneWire(ONE_WIRE_BUS);
+OneWire oneWireBoard(ONEWIRE_BOARD_BUS);
+OneWire oneWireWater(ONEWIRE_WATER_BUS);
 
 // Create the sensor by passing a reference to the oneWire instance we created.
-DallasTemperature sensors(&oneWire);
+DallasTemperature boardSensor(&oneWireBoard);
+DallasTemperature waterSensor(&oneWireWater);
 
 /************** Setup Routing Starts Here *****************************/
 void setup() {
@@ -294,12 +295,12 @@ void setup() {
   // Statrus LED Setup
   pinMode(STATUS_PIN, OUTPUT);
   digitalWrite(STATUS_PIN, HIGH);
-  delay(500);
+  delay(50);
 
   DEBUG("\n\n")
   Serial.println();
   Serial.println(F("ESP8266 HotTub MQTT Controller"));
-  Serial.println(F("Version: 3.3.2   August 20228"));
+  Serial.println(F("Version: 4.0.0 beta   August 2022"));
 
   // Grab the config stored in the SPIFFS File system.
   readConfig();
@@ -321,8 +322,8 @@ void setup() {
   // Allow for a pin to reset all the WiFi Setup information.
   // The is similar to factory reset as it will boot into AP mode. 
   if ( drd.detectDoubleReset() ) {
-    Serial.println("Double Reset Detected...");
-    Serial.println("Reseting the Board Config back to factory.");
+    Serial.println(F("Double Reset Detected..."));
+    Serial.println(F("Reseting the Board Config back to factory."));
     
     strcpy(mqtt_server, "mqtt.example.com");
     strcpy(mqtt_port, "1883");
@@ -331,7 +332,7 @@ void setup() {
     saveConfig();
     
     delay(100);
-    Serial.println("Reseting the WiFi Settings.");
+    Serial.println(F("Reseting the WiFi Settings."));
     wifiManager.resetSettings();
     delay(500);
     drd.stop();
@@ -362,21 +363,14 @@ void setup() {
   strcpy(mqtt_user, custom_mqtt_user.getValue());
   strcpy(mqtt_pass, custom_mqtt_pass.getValue());
 
-  DEBUGVAR( "MQTT Server : ", mqtt_server ); DEBUG("\n");
+  DEBUGVAR( "\nMQTT Server : ", mqtt_server ); DEBUG("\n");
   DEBUGVAR( "MQTT Port   : ", mqtt_port ); DEBUG("\n");
   DEBUGVAR( "MQTT User   : ", mqtt_user ); DEBUG("\n");
   DEBUGVAR( "MQTT Pass   : ", mqtt_pass ); DEBUG("\n")
-   // Serial.print( "MQTT Server : " );
-  // Serial.println( mqtt_server );
-  // Serial.print( "MQTT port   : ");
-  // Serial.println( mqtt_port );
-  // Serial.print( "MQTT user   : ");
-  // Serial.println( mqtt_user );
-  // Serial.print( "MQTT pass   : ");
-  // Serial.println( mqtt_pass );
+
    
-  Serial.print("Board Sensor : ");
-  printAddress(boardSensor);
+  Serial.print(F("Board Sensor : "));
+  printAddress(boardSensorAddr);
   Serial.println();
 
   if (shouldSaveConfig) {
@@ -387,82 +381,95 @@ void setup() {
   mqtt.begin(mqtt_server, client);
   mqtt.onMessage(messageReceived);
 
-  DEBUG("MQTT : \n")
-  DEBUG("Publishing Board Temparature on:")
+  DEBUG("\n\n")
+  DEBUG("Publishing Board Temparature on : ")
   DEBUG(BOARD_TOPIC)
   DEBUG("\n")
-  DEBUG("Publishing Water Temparature on:")
+  DEBUG("Publishing Water Temparature on : ")
   DEBUG(BOARD_TOPIC)
-  DEBUG("\n")
+  DEBUG("\n\n")
   
   connect();
 
   // Setup the Tempature Sensor
-  sensors.begin();
+  boardSensor.begin();
+  waterSensor.begin();
 
-  int sensorCount = sensors.getDeviceCount();
-  Serial.print("Found ");
-  Serial.print(sensorCount, DEC);
-  Serial.println(" devices.");
+  int sensorCount = boardSensor.getDeviceCount();
+  DEBUGVAR("Found ", sensorCount);
+  DEBUG(" devices on the board sensor bus.\n")
 
   // Check to see if the board sensor is responding.
-  if (! checkForAddress(sensors, boardSensor)) {
-    Serial.println("\nERROR: Unable to locate the board sensor.");
+  if (! checkForAddress(boardSensor, boardSensorAddr)) {
     if ( sensorCount > 1 ) {
-      Serial.println("Unplug any external sensors and restart the device.");
+      Serial.println(F("\nFound more than one sensor on the Board Sensor Bus. This is an error."));
+      Serial.println(F("There should only be one board sensor. This may be an earlier version "));
+      Serial.println(F("of the monitor board."));
+      Serial.println(F("This needs to be fixed before we can continue. Stopping the Monitor."));
       stop();
     }
     
-    // We only have one sensor so it must be the board sensor.
+
     if ( sensorCount == 1 ) {
-      sensors.getAddress(boardSensor, 0);
-      Serial.print("\nFound one sensor with the following address: ");
-      printAddress(boardSensor);
+      boardSensor.getAddress(boardSensorAddr, 0);
+      Serial.print(F("\nFound the board sensor with the following address: "));
+      printAddress(boardSensorAddr);
       Serial.println();
       
       // Found a new board sensor.  Update the saved config.
       saveConfig();
       
-      Serial.print("Updating the config in flash... ");
-      Serial.println("You can now connect the remote sensor and reboot."); 
-      stop();
+      DEBUG("Updating the config in flash... ");
     }
     
     // Opps, wasn't able to find any sensors.  Display an error and halt.
     if ( sensorCount < 1 ) {
-      Serial.println("\nERROR: Unable to locate any sensors.  There should be one on the board so this is a big problem.");
-      Serial.println("The sensor board is in need of repair.");
+      Serial.println(F("\nERROR: Unable to locate a board sensor.  There should be one on the board so this is a big problem."));
+      Serial.println(F("The sensor board is in need of repair. Stopping the Monitor."));
       stop();
     }
   }
 
-  Serial.println("Checking for board and water Sensors..." );  
+  sensorCount = waterSensor.getDeviceCount();
+  DEBUGVAR("Found ", sensorCount);
+  DEBUG(" devices on the water sensor bus.\n")
+  
+  if ( sensorCount < 1 ) {
+    Serial.println(F("\nERROR: Unable to locate a water sensor.  Did you plug it in?"));
+    Serial.println(F("If the water sensor is plugged in then there is a hardware error"));
+    Serial.println(F("and the sendor board is in need of repair.  If you just fogot to"));
+    Serial.println(F("plug in the water sensor, then turn the monitor off, plug the sensor"));
+    Serial.println(F("and turn it back on.  Stopping the Monitor!"));
+    stop();
+  }
+  Serial.println(F("Checking for board and water Sensors..." ));  
   // We know what the boardSensor is so we can now figure out what the
   // water sensor is.
   DeviceAddress tempAddr;
   for (int i=0; i < sensorCount; i++) {
-    sensors.getAddress(tempAddr,i);
-    if ( ! compareAddress( boardSensor, tempAddr )) {
-      memcpy(waterSensor, tempAddr, sizeof(tempAddr));
+    waterSensor.getAddress(tempAddr,i);
+    if ( ! compareAddress( boardSensorAddr, tempAddr )) {
+      memcpy(waterSensorAddr, tempAddr, sizeof(tempAddr));
     }
   }
 
-  if ( sensors.validAddress(boardSensor) ) {
-    Serial.print("Board Sensor Address: ");
-    printAddress(boardSensor);
+  if ( boardSensor.validAddress(boardSensorAddr) ) {
+    Serial.print(F("Board Sensor Address: "));
+    printAddress(boardSensorAddr);
     Serial.println();
   }
 
-  if ( sensors.validAddress(waterSensor) ) {
-    Serial.print("Water Sensor Address: ");
-    printAddress(waterSensor);
+  if ( waterSensor.validAddress(waterSensorAddr) ) {
+    Serial.print(F("Water Sensor Address: "));
+    printAddress(waterSensorAddr);
     Serial.println();
   }
     
   // sensors.setResolution(tempSensor, 12);
   // sensors.setWaitForConversion(false);
 
-  delay(500);  
+  DEBUG("\n\n")
+  delay(100);  
 }
 
 /************** The MAIN execution loop starts here *************************/
@@ -489,39 +496,45 @@ void loop() {
   long now = millis();
   if (now - lastMsg > 60000) {        // Only send an update every Min.
     lastMsg = now;
-    
-    sensors.requestTemperatures();
+
+    // ******** Board Sensor Polling *******
+    boardSensor.requestTemperatures();
 
     // Record the board temperature but only if it is available.
-    if ( checkForAddress(sensors, boardSensor) ) {
+    if ( checkForAddress(boardSensor, boardSensorAddr) ) {
       
-      temp = sensors.getTempF(boardSensor); 
+      temp = boardSensor.getTempF(boardSensorAddr); 
       dtostrf( temp, 5, 2, buff);
       if (! mqtt.publish(BOARD_TOPIC, buff)) { // Publish the value and check if OK
         Serial.println(F("Failed update"));
       } else {
-        Serial.println(F("Successful update!"));
+        DEBUGVAR("Board Temp : ", temp)
+        Serial.println(F(" update successful!"));
       }
       temp = 0;
     } else {
-      Serial.println("Unable to detect the boardSensor.");
+      Serial.println(F("Unable to detect the boardSensor."));
     }
 
+    // ******** Water Sensor Polling *******
+    waterSensor.requestTemperatures();
+
     // Record the water sensor but only if it is available.
-    if ( checkForAddress(sensors, waterSensor)) {
+    if ( checkForAddress(waterSensor, waterSensorAddr)) {
       
-      temp = sensors.getTempF(waterSensor);  
+      temp = waterSensor.getTempF(waterSensorAddr);  
 
       dtostrf( temp, 5, 2, buff);        
       if (! mqtt.publish(WATER_TOPIC, buff)) { // Publish the value and check if OK
         Serial.println(F("Failed update"));
       } else {
-        Serial.println(F("Successful update!"));
+        DEBUGVAR("Water Temp : ", temp)
+        Serial.println(F(" update successful!"));
       }
 
       temp = 0;
     } else {
-      Serial.println("Unable to detect the waterSensor.");
+      Serial.println(F("Unable to detect the waterSensor."));
     }
   }
 
